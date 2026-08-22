@@ -2,10 +2,9 @@
 import numpy as np
 import time
 from game2048_v3_mask import Game2048V3MaskEnv
-from bitboard_v5_god import get_v5_ultimate_move
-from expectimax_god_v4 import get_adaptive_god_move
+from expectimax_god_engine import get_god_move, clear_transposition_table
 
-st.set_page_config(page_title="AI 2048 Master Dashboard", page_icon="🎮", layout="wide")
+st.set_page_config(page_title="2048 AI Dashboard", page_icon="🎮", layout="wide")
 
 TILE_COLORS = {
     0: "#cdc1b4", 2: "#eee4da", 4: "#ede0c8", 8: "#f2b179",
@@ -29,18 +28,14 @@ def render_board_html(board):
     html += "</div>"
     return html
 
-st.title("🧠 Deep Reinforcement Learning & Bitboard 2048 Solver")
-st.markdown("Interaktywna Aplikacja AI oparta na **64-bitowym Bitboardzie C++ ($O(1)$ Lookup)** oraz **Expectimax D4 Symmetry**.")
+st.title("🧠 2048 AI Solver: Bitboard & Expectimax")
+st.markdown("Aplikacja demonstrująca działanie sztucznej inteligencji opartej na **64-bitowych rejestrach CPU** i **Expectimax Tree Search**.")
 
 col_left, col_right = st.columns([1.2, 0.8])
 
 with col_right:
-    st.subheader("⚙️ Ustawienia Silnika AI")
-    ai_mode = st.selectbox(
-        "Wybierz Silnik AI:",
-        ["⚡ Bitboard V5 God Engine (O(1) C++)", "👑 Expectimax V4 (D4 Symmetry)", "🎲 Losowy Gracz"]
-    )
-    speed = st.slider("Opóźnienie animacji (sekundy):", min_value=0.01, max_value=0.5, value=0.04, step=0.01)
+    st.subheader("⚙️ Ustawienia")
+    speed = st.slider("Opóźnienie animacji (sekund):", min_value=0.01, max_value=0.5, value=0.03, step=0.01)
     start_button = st.button("🚀 Uruchom Mecz AI", type="primary", use_container_width=True)
 
 with col_left:
@@ -52,6 +47,7 @@ with col_left:
     moves_metric = metric_col3.empty()
 
 if start_button:
+    clear_transposition_table()
     env = Game2048V3MaskEnv()
     obs, info = env.reset()
     done = False
@@ -59,15 +55,7 @@ if start_button:
 
     while not done:
         masks = env.action_masks()
-        
-        if "Bitboard V5" in ai_mode:
-            action, depth_used = get_v5_ultimate_move(env.board, valid_mask=masks)
-        elif "Expectimax V4" in ai_mode:
-            action, depth_used = get_adaptive_god_move(env.board, valid_mask=masks)
-        else:
-            valid_actions = np.where(masks)[0]
-            action = np.random.choice(valid_actions) if len(valid_actions) > 0 else 0
-
+        action, depth_used = get_god_move(env.board, valid_mask=masks)
         obs, reward, done, truncated, info = env.step(action)
         step += 1
 

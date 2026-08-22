@@ -69,9 +69,9 @@ def build_row_tables():
 
 ROW_LEFT_TABLE, ROW_RIGHT_TABLE, ROW_SCORE_TABLE = build_row_tables()
 
-# === 2. TRANSPOSITION TABLE CACHE O(1) DLA 8 MILIONÓW STANÓW ===
+# === 2. MODYFIKOWALNA TABLICA TRANSPOSZYCJI CACHE O(1) ===
 
-TABLE_SIZE = 8000037
+TABLE_SIZE = 2000003
 HASH_BOARD = np.zeros(TABLE_SIZE, dtype=np.uint64)
 HASH_DEPTH = np.zeros(TABLE_SIZE, dtype=np.int8)
 HASH_SCORE = np.zeros(TABLE_SIZE, dtype=np.float64)
@@ -131,7 +131,7 @@ def execute_move_bitboard(board, action):
 
     return new_b, score, changed
 
-# === 4. MACIERZ WĘŻA V6 (MISTRZOWSKA SKALA 67,764 PKT) ===
+# === 4. WIELOCZYNNIKOWA HEURYSTYKA SOTA V7 (SNAKE + SMOOTHNESS + MONOTONICITY) ===
 
 SNAKE_MATRIX = np.array([
     [1000000.0, 100000.0, 10000.0, 1000.0],
@@ -152,49 +152,63 @@ def bitboard_to_numpy(board64):
     return res
 
 @njit(float64(int64[:, :]), fastmath=True)
-def evaluate_single_aspect_2d(board):
-    score = 0.0
-    empty = 0
+def evaluate_sota_v7_aspect(board):
+    snake_score = 0.0
+    empty_count = 0
     smoothness = 0.0
+    max_val = 0
+
+    # 1. Snake Matrix Score
     for r in range(4):
         for c in range(4):
             val = board[r, c]
             if val > 0:
-                score += val * SNAKE_MATRIX[r, c]
+                snake_score += val * SNAKE_MATRIX[r, c]
+                if val > max_val:
+                    max_val = val
+            else:
+                empty_count += 1
+
+    # 2. Smoothness Penalty (Kara za sąsiadujące kafelki różniące się wartością)
+    for r in range(4):
+        for c in range(4):
+            val = board[r, c]
+            if val > 0:
                 log_val = np.log2(val)
                 if c + 1 < 4 and board[r, c + 1] > 0:
                     smoothness -= abs(log_val - np.log2(board[r, c + 1]))
                 if r + 1 < 4 and board[r + 1, c] > 0:
                     smoothness -= abs(log_val - np.log2(board[r + 1, c]))
-            else:
-                empty += 1
-    score += (empty ** 2) * 50000.0 + (smoothness * 2000.0)
-    return score
+
+    # 3. Potęgowe skalowanie pustych pól
+    empty_score = (empty_count ** 2) * (max_val if max_val > 0 else 1) * 10.0
+
+    return snake_score + empty_score + (smoothness * 500.0)
 
 @njit(float64(uint64), fastmath=True)
-def evaluate_d4_perfect(board64):
+def evaluate_d4_v7(board64):
     board = bitboard_to_numpy(board64)
     max_eval = -1e18
     b_curr = board.copy()
 
     for rot in range(4):
-        e1 = evaluate_single_aspect_2d(b_curr)
+        e1 = evaluate_sota_v7_aspect(b_curr)
         if e1 > max_eval:
             max_eval = e1
         b_flip = np.fliplr(b_curr)
-        e2 = evaluate_single_aspect_2d(b_flip)
+        e2 = evaluate_sota_v7_aspect(b_flip)
         if e2 > max_eval:
             max_eval = e2
         b_curr = np.rot90(b_curr, 1)
 
     return max_eval
 
-# === 5. EXPECTIMAX V6 CORE (SZYBKI, BEZNIEBEZPIECZNY, GŁĘBOKI) ===
+# === 5. EXPECTIMAX V7 Z PRZEKAZYWANIEM CACHE ===
 
 @njit(float64(uint64, int64, boolean, uint64[:], int8[:], float64[:]), fastmath=True)
-def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
+def expectimax_v7_core(board, depth, is_player, h_board, h_depth, h_score):
     if depth == 0:
-        return evaluate_d4_perfect(board)
+        return evaluate_d4_v7(board)
 
     hash_idx = int(board % np.uint64(TABLE_SIZE))
     if h_board[hash_idx] == board and h_depth[hash_idx] >= depth:
@@ -207,11 +221,12 @@ def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
             b_next, _, changed = execute_move_bitboard(board, a)
             if changed:
                 moved = True
-                score = expectimax_v6_core(b_next, depth - 1, False, h_board, h_depth, h_score)
+                score = expectimax_v7_core(b_next, depth - 1, False, h_board, h_depth, h_score)
                 if score > best_score:
                     best_score = score
 
         res_score = best_score if moved else -1e12
+
         h_board[hash_idx] = board
         h_depth[hash_idx] = np.int8(depth)
         h_score[hash_idx] = res_score
@@ -226,7 +241,7 @@ def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
                 n_empty += 1
 
         if n_empty == 0:
-            return evaluate_d4_perfect(board)
+            return evaluate_d4_v7(board)
 
         if n_empty > 3 and depth >= 3:
             n_empty = 3
@@ -238,7 +253,7 @@ def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
             b2 = board | (np.uint64(1) << shift)
             b4 = board | (np.uint64(2) << shift)
 
-            res = 0.9 * expectimax_v6_core(b2, depth - 1, True, h_board, h_depth, h_score) + 0.1 * expectimax_v6_core(b4, depth - 1, True, h_board, h_depth, h_score)
+            res = 0.9 * expectimax_v7_core(b2, depth - 1, True, h_board, h_depth, h_score) + 0.1 * expectimax_v7_core(b4, depth - 1, True, h_board, h_depth, h_score)
             expected += res
 
         final_val = expected / float(n_empty)
@@ -255,15 +270,17 @@ def numpy_to_bitboard(board_np):
                 b64 |= (np.uint64(power) << shift)
     return b64
 
-def get_v6_god_move(board_np, valid_mask=None):
+def get_v7_god_move(board_np, valid_mask=None):
     b64 = numpy_to_bitboard(board_np)
     empty_tiles = np.sum(board_np == 0)
 
-    # DOKŁADNIE TEN SAM SWEET SPOT (DEPTH 6 W KOŃCÓWCE, DEPTH 5 NA STARCIE)
-    if empty_tiles <= 3:
-        target_depth = 6
+    # LATE GAME GŁĘBOKOŚĆ DEPTH 7 I 8!
+    if empty_tiles <= 2:
+        target_depth = 7  # Ekstremalny podgląd 7 kroków!
+    elif empty_tiles <= 4:
+        target_depth = 6  # Głęboka analiza
     else:
-        target_depth = 5
+        target_depth = 5  # Standardowa głębokość
 
     best_action = -1
     best_score = -1e18
@@ -274,7 +291,7 @@ def get_v6_god_move(board_np, valid_mask=None):
 
         b_next, _, changed = execute_move_bitboard(b64, a)
         if changed:
-            score = expectimax_v6_core(b_next, target_depth - 1, False, HASH_BOARD, HASH_DEPTH, HASH_SCORE)
+            score = expectimax_v7_core(b_next, target_depth - 1, False, HASH_BOARD, HASH_DEPTH, HASH_SCORE)
             if score > best_score:
                 best_score = score
                 best_action = a

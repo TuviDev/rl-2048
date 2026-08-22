@@ -1,8 +1,8 @@
 ﻿import time
 import numpy as np
-from numba import njit, uint16, uint32, uint64, int64, int8, float64, boolean, types
+from numba import njit, prange, uint16, uint32, uint64, int64, int8, float64, boolean, types
 
-# === 1. PREKOMPILACJA TABLIC LOOKUP O(1) DLA RUCHÓW BITOWYCH ===
+# === 1. PREKOMPILACJA TABLIC LOOKUP O(1) ===
 
 def build_row_tables():
     row_left_table = np.zeros(65536, dtype=np.uint64)
@@ -17,7 +17,6 @@ def build_row_tables():
             (row_val >> 12) & 0x0F
         ]
 
-        # LEWO
         non_zero = [c for c in cells if c > 0]
         merged_left = []
         score = 0
@@ -42,7 +41,6 @@ def build_row_tables():
         row_left_table[row_val] = left_val
         row_score_table[row_val] = np.uint64(score)
 
-        # PRAWO
         non_zero_rev = [c for c in reversed(cells) if c > 0]
         merged_right_temp = []
         skip = False
@@ -69,9 +67,9 @@ def build_row_tables():
 
 ROW_LEFT_TABLE, ROW_RIGHT_TABLE, ROW_SCORE_TABLE = build_row_tables()
 
-# === 2. TRANSPOSITION TABLE CACHE O(1) DLA 8 MILIONÓW STANÓW ===
+# === 2. TRANSPOSITION TABLE ===
 
-TABLE_SIZE = 8000037
+TABLE_SIZE = 4000037
 HASH_BOARD = np.zeros(TABLE_SIZE, dtype=np.uint64)
 HASH_DEPTH = np.zeros(TABLE_SIZE, dtype=np.int8)
 HASH_SCORE = np.zeros(TABLE_SIZE, dtype=np.float64)
@@ -131,14 +129,23 @@ def execute_move_bitboard(board, action):
 
     return new_b, score, changed
 
-# === 4. MACIERZ WĘŻA V6 (MISTRZOWSKA SKALA 67,764 PKT) ===
+# === 4. MACIERZ 3.5^k ===
 
-SNAKE_MATRIX = np.array([
-    [1000000.0, 100000.0, 10000.0, 1000.0],
-    [100.0,     200.0,    400.0,   800.0],
-    [80.0,      60.0,     40.0,    20.0],
-    [1.0,       2.0,      3.0,     4.0]
-], dtype=np.float64)
+SNAKE_PATH = [
+    (0,0), (0,1), (0,2), (0,3),
+    (1,3), (1,2), (1,1), (1,0),
+    (2,0), (2,1), (2,2), (2,3),
+    (3,3), (3,2), (3,1), (3,0)
+]
+
+def build_uniform_snake_matrix():
+    mat = np.zeros((4, 4), dtype=np.float64)
+    base = 3.5
+    for k, (r, c) in enumerate(reversed(SNAKE_PATH)):
+        mat[r, c] = base ** k
+    return mat
+
+UNIFORM_SNAKE_MATRIX = build_uniform_snake_matrix()
 
 @njit(int64[:, :](uint64), fastmath=True)
 def bitboard_to_numpy(board64):
@@ -160,7 +167,7 @@ def evaluate_single_aspect_2d(board):
         for c in range(4):
             val = board[r, c]
             if val > 0:
-                score += val * SNAKE_MATRIX[r, c]
+                score += val * UNIFORM_SNAKE_MATRIX[r, c]
                 log_val = np.log2(val)
                 if c + 1 < 4 and board[r, c + 1] > 0:
                     smoothness -= abs(log_val - np.log2(board[r, c + 1]))
@@ -189,10 +196,8 @@ def evaluate_d4_perfect(board64):
 
     return max_eval
 
-# === 5. EXPECTIMAX V6 CORE (SZYBKI, BEZNIEBEZPIECZNY, GŁĘBOKI) ===
-
 @njit(float64(uint64, int64, boolean, uint64[:], int8[:], float64[:]), fastmath=True)
-def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
+def expectimax_v9_core(board, depth, is_player, h_board, h_depth, h_score):
     if depth == 0:
         return evaluate_d4_perfect(board)
 
@@ -207,7 +212,7 @@ def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
             b_next, _, changed = execute_move_bitboard(board, a)
             if changed:
                 moved = True
-                score = expectimax_v6_core(b_next, depth - 1, False, h_board, h_depth, h_score)
+                score = expectimax_v9_core(b_next, depth - 1, False, h_board, h_depth, h_score)
                 if score > best_score:
                     best_score = score
 
@@ -228,8 +233,8 @@ def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
         if n_empty == 0:
             return evaluate_d4_perfect(board)
 
-        if n_empty > 3 and depth >= 3:
-            n_empty = 3
+        if n_empty > 2 and depth >= 3:
+            n_empty = 2
 
         expected = 0.0
         for idx in range(n_empty):
@@ -238,7 +243,7 @@ def expectimax_v6_core(board, depth, is_player, h_board, h_depth, h_score):
             b2 = board | (np.uint64(1) << shift)
             b4 = board | (np.uint64(2) << shift)
 
-            res = 0.9 * expectimax_v6_core(b2, depth - 1, True, h_board, h_depth, h_score) + 0.1 * expectimax_v6_core(b4, depth - 1, True, h_board, h_depth, h_score)
+            res = 0.9 * expectimax_v9_core(b2, depth - 1, True, h_board, h_depth, h_score) + 0.1 * expectimax_v9_core(b4, depth - 1, True, h_board, h_depth, h_score)
             expected += res
 
         final_val = expected / float(n_empty)
@@ -255,34 +260,46 @@ def numpy_to_bitboard(board_np):
                 b64 |= (np.uint64(power) << shift)
     return b64
 
-def get_v6_god_move(board_np, valid_mask=None):
+# === 5. WIELOWĄTKOWA PRZETWARZANIE PRANGE DLA PROCESORA XEON (DEPTH 7!) ===
+
+@njit(parallel=True, fastmath=True)
+def get_v9_parallel_scores(b64, valid_actions, target_depth, h_board, h_depth, h_score):
+    n_actions = len(valid_actions)
+    scores = np.zeros(n_actions, dtype=np.float64)
+
+    # RÓWNOLEGŁA PĘTLA NUMBA PRANGE (Używa wszystkich wątków Xeona!)
+    for i in prange(n_actions):
+        a = valid_actions[i]
+        b_next, _, changed = execute_move_bitboard(b64, a)
+        if changed:
+            scores[i] = expectimax_v9_core(b_next, target_depth - 1, False, h_board, h_depth, h_score)
+        else:
+            scores[i] = -1e12
+
+    return scores
+
+def get_v9_god_move(board_np, valid_mask=None):
     b64 = numpy_to_bitboard(board_np)
     empty_tiles = np.sum(board_np == 0)
 
-    # DOKŁADNIE TEN SAM SWEET SPOT (DEPTH 6 W KOŃCÓWCE, DEPTH 5 NA STARCIE)
+    # ZWIĘKSZONA GŁĘBOKOŚĆ DZIĘKI 28 WĄTKOM XEONA (DEPTH 7 W KOŃCÓWCE!)
     if empty_tiles <= 3:
-        target_depth = 6
+        target_depth = 7  # EXTREME DEPTH 7!
     else:
-        target_depth = 5
+        target_depth = 6  # STANDARD DEPTH 6!
 
-    best_action = -1
-    best_score = -1e18
-
+    valid_actions = []
     for a in range(4):
-        if valid_mask is not None and not valid_mask[a]:
-            continue
+        if valid_mask is None or valid_mask[a]:
+            _, _, changed = execute_move_bitboard(b64, a)
+            if changed:
+                valid_actions.append(a)
 
-        b_next, _, changed = execute_move_bitboard(b64, a)
-        if changed:
-            score = expectimax_v6_core(b_next, target_depth - 1, False, HASH_BOARD, HASH_DEPTH, HASH_SCORE)
-            if score > best_score:
-                best_score = score
-                best_action = a
+    if not valid_actions:
+        return 0, target_depth
 
-    if best_action == -1:
-        if valid_mask is not None and np.any(valid_mask):
-            best_action = int(np.where(valid_mask)[0][0])
-        else:
-            best_action = 0
+    valid_actions_arr = np.array(valid_actions, dtype=np.int64)
+    scores = get_v9_parallel_scores(b64, valid_actions_arr, target_depth, HASH_BOARD, HASH_DEPTH, HASH_SCORE)
 
-    return best_action, target_depth
+    best_idx = np.argmax(scores)
+    return int(valid_actions_arr[best_idx]), target_depth
