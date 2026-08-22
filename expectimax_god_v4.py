@@ -2,6 +2,7 @@
 import numpy as np
 from numba import njit
 
+# Najpotężniejsza Matryca Węża V4
 SNAKE_MATRIX = np.array([
     [1000000.0, 100000.0, 10000.0, 1000.0],
     [100.0,     200.0,    400.0,   800.0],
@@ -80,8 +81,10 @@ def evaluate_single_aspect(board):
 
 @njit(fastmath=True)
 def evaluate_board_d4_symmetry(board):
+    """Ocena planszy uwzględniająca pełną 8-krotną symetrię grupy D4 (4 obroty + odbicie)."""
     max_eval = -1e18
     b_curr = board.copy()
+
     for rot in range(4):
         e1 = evaluate_single_aspect(b_curr)
         if e1 > max_eval:
@@ -91,6 +94,7 @@ def evaluate_board_d4_symmetry(board):
         if e2 > max_eval:
             max_eval = e2
         b_curr = np.rot90(b_curr, 1)
+
     return max_eval
 
 @njit(fastmath=True)
@@ -116,12 +120,13 @@ def expectimax_v4(board, depth, is_player):
                 if board[r, c] == 0:
                     empty_positions.append((r, c))
 
-        if len(empty_positions) == 0:
+        n_empty = len(empty_positions)
+        if n_empty == 0:
             return evaluate_board_d4_symmetry(board)
 
-        # Ograniczenie próbkowania do max 2 pustych pól przy dużej głębokości (Super Szybkość!)
-        if len(empty_positions) > 2 and depth >= 3:
-            empty_positions = empty_positions[:2]
+        if n_empty > 3 and depth >= 3:
+            empty_positions = empty_positions[:3]
+            n_empty = 3
 
         expected = 0.0
         for pos in empty_positions:
@@ -134,27 +139,36 @@ def expectimax_v4(board, depth, is_player):
             b4[r, c] = 4
             expected += 0.1 * expectimax_v4(b4, depth - 1, True)
 
-        return expected / len(empty_positions)
+        return expected / float(n_empty)
 
-def get_adaptive_god_move(board):
+def get_adaptive_god_move(board, valid_mask=None):
     board_64 = board.astype(np.int64)
-
-    # Optymalny i superszybki dobór głębokości
     empty_tiles = np.sum(board == 0)
+
+    # DYNAMIC DEPTH SCALING
     if empty_tiles <= 3:
         target_depth = 5
     else:
         target_depth = 4
 
-    best_action = 0
+    best_action = -1
     best_score = -1e18
 
     for a in range(4):
+        if valid_mask is not None and not valid_mask[a]:
+            continue
+
         b_next, _, changed = simulate_move_numba(board_64, a)
         if changed:
             score = expectimax_v4(b_next, target_depth - 1, False)
             if score > best_score:
                 best_score = score
                 best_action = a
+
+    if best_action == -1:
+        if valid_mask is not None and np.any(valid_mask):
+            best_action = int(np.where(valid_mask)[0][0])
+        else:
+            best_action = 0
 
     return best_action, target_depth

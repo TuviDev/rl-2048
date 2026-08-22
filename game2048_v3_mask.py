@@ -21,6 +21,7 @@ class Game2048V3MaskEnv(gym.Env):
         self.score = 0
         self.max_tile = 0
         self.move_count = 0
+        self.consecutive_invalid = 0
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -28,6 +29,7 @@ class Game2048V3MaskEnv(gym.Env):
         self.score = 0
         self.max_tile = 0
         self.move_count = 0
+        self.consecutive_invalid = 0
         self._add_random_tile()
         self._add_random_tile()
         return self._get_obs(), self._get_info()
@@ -39,8 +41,6 @@ class Game2048V3MaskEnv(gym.Env):
             merged_score, changed = self._simulate_move(temp_b, a)
             if changed:
                 masks[a] = True
-        if not np.any(masks):
-            return np.ones(4, dtype=bool)
         return masks
 
     def step(self, action):
@@ -48,24 +48,23 @@ class Game2048V3MaskEnv(gym.Env):
         merge_score, board_changed = self._simulate_move(self.board, action)
 
         if board_changed:
-            self.score += merge_score  # <-- TUTAJ NAPRAWIONO ZLICZANIE PUKNTÓW!
+            self.score += merge_score
             self._add_random_tile()
             self.move_count += 1
+            self.consecutive_invalid = 0
+        else:
+            self.consecutive_invalid += 1
 
         current_max = int(self.board.max()) if self.board.max() > 0 else 0
         self.max_tile = max(self.max_tile, current_max)
 
-        done = self._is_game_over() or not np.any(self.action_masks())
+        # Zabezpieczenie przed pętlą: koniec gdy brak ruchów LUB 2 nieudane ruchy
+        valid_masks = self.action_masks()
+        done = self._is_game_over() or (not np.any(valid_masks)) or (self.consecutive_invalid >= 2)
 
-        reward = 0.0
-        if merge_score > 0:
-            reward += np.log2(merge_score) * 2.0
-
+        reward = float(merge_score)
         empty_count = np.sum(self.board == 0)
         reward += empty_count * 0.3
-
-        if done and self._is_game_over():
-            reward -= 20.0
 
         return self._get_obs(), float(reward), done, False, self._get_info()
 
