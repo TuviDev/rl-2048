@@ -11,7 +11,6 @@ class Game2048V3MaskEnv(gym.Env):
         self.render_mode = render_mode
         self.size = 4
 
-        # Reprezentacja One-Hot (16 x 4 x 4)
         self.observation_space = spaces.Box(
             low=0, high=1, shape=(16, self.size, self.size), dtype=np.float32
         )
@@ -34,15 +33,12 @@ class Game2048V3MaskEnv(gym.Env):
         return self._get_obs(), self._get_info()
 
     def action_masks(self) -> np.ndarray:
-        """Zwraca maskę boolowską: True dla ruchów legalnych, False dla zabronionych."""
         masks = np.zeros(4, dtype=bool)
         for a in range(4):
             temp_b = self.board.copy()
             merged_score, changed = self._simulate_move(temp_b, a)
             if changed:
                 masks[a] = True
-        
-        # Jeśli żaden ruch nie zmienia stanu -> odblokuj wszystko (koniec gry)
         if not np.any(masks):
             return np.ones(4, dtype=bool)
         return masks
@@ -52,6 +48,7 @@ class Game2048V3MaskEnv(gym.Env):
         merge_score, board_changed = self._simulate_move(self.board, action)
 
         if board_changed:
+            self.score += merge_score  # <-- TUTAJ NAPRAWIONO ZLICZANIE PUKNTÓW!
             self._add_random_tile()
             self.move_count += 1
 
@@ -60,7 +57,6 @@ class Game2048V3MaskEnv(gym.Env):
 
         done = self._is_game_over() or not np.any(self.action_masks())
 
-        # Nagroda zlogarytmowana + bonus za puste pola
         reward = 0.0
         if merge_score > 0:
             reward += np.log2(merge_score) * 2.0
