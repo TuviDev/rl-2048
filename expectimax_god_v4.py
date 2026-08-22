@@ -2,7 +2,6 @@
 import numpy as np
 from numba import njit
 
-# Najpotężniejsza Matryca Węża V4
 SNAKE_MATRIX = np.array([
     [1000000.0, 100000.0, 10000.0, 1000.0],
     [100.0,     200.0,    400.0,   800.0],
@@ -11,77 +10,76 @@ SNAKE_MATRIX = np.array([
 ], dtype=np.float64)
 
 @njit(fastmath=True)
-def move_left(board):
-    new_b = np.zeros((4, 4), dtype=np.int64)
+def move_left_row(row):
+    non_zero = row[row != 0]
+    merged = np.zeros(4, dtype=np.int64)
+    idx = 0
     score = 0
-    changed = False
+    skip = False
 
-    for r in range(4):
-        row = board[r]
-        non_zero = row[row != 0]
-        merged = np.zeros(4, dtype=np.int64)
-        idx = 0
-        skip = False
+    for i in range(len(non_zero)):
+        if skip:
+            skip = False
+            continue
+        if i + 1 < len(non_zero) and non_zero[i] == non_zero[i + 1]:
+            val = non_zero[i] * 2
+            merged[idx] = val
+            score += val
+            skip = True
+            idx += 1
+        else:
+            merged[idx] = non_zero[i]
+            idx += 1
 
-        for i in range(len(non_zero)):
-            if skip:
-                skip = False
-                continue
-            if i + 1 < len(non_zero) and non_zero[i] == non_zero[i + 1]:
-                val = non_zero[i] * 2
-                merged[idx] = val
-                score += val
-                skip = True
-                idx += 1
-            else:
-                merged[idx] = non_zero[i]
-                idx += 1
-
-        for c in range(4):
-            new_b[r, c] = merged[c]
-            if board[r, c] != merged[c]:
-                changed = True
-
-    return new_b, score, changed
+    return merged, score
 
 @njit(fastmath=True)
 def simulate_move_numba(board, action):
-    if action == 0:   # Left
-        return move_left(board)
-    elif action == 1: # Up
-        b_rot = np.rot90(board, -1)
-        b_new, s, ch = move_left(b_rot)
-        return np.rot90(b_new, 1), s, ch
-    elif action == 2: # Right
-        b_rot = np.rot90(board, 2)
-        b_new, s, ch = move_left(b_rot)
-        return np.rot90(b_new, 2), s, ch
-    elif action == 3: # Down
-        b_rot = np.rot90(board, 1)
-        b_new, s, ch = move_left(b_rot)
-        return np.rot90(b_new, -1), s, ch
-    return board, 0, False
+    new_b = np.zeros((4, 4), dtype=np.int64)
+    total_score = 0
+
+    if action == 0: # LEWO
+        for r in range(4):
+            new_b[r], s = move_left_row(board[r])
+            total_score += s
+    elif action == 2: # PRAWO
+        for r in range(4):
+            rev, s = move_left_row(board[r][::-1])
+            new_b[r] = rev[::-1]
+            total_score += s
+    elif action == 1: # GÓRA
+        trans = board.T
+        for r in range(4):
+            new_b[r], s = move_left_row(trans[r])
+            total_score += s
+        new_b = new_b.T
+    elif action == 3: # DÓŁ
+        trans = board.T
+        for r in range(4):
+            rev, s = move_left_row(trans[r][::-1])
+            new_b[r] = rev[::-1]
+            total_score += s
+        new_b = new_b.T
+
+    changed = not np.array_equal(board, new_b)
+    return new_b, total_score, changed
 
 @njit(fastmath=True)
 def evaluate_single_aspect(board):
     score = 0.0
+    empty = 0
     for r in range(4):
         for c in range(4):
             val = board[r, c]
             if val > 0:
                 score += val * SNAKE_MATRIX[r, c]
-
-    empty = 0
-    for r in range(4):
-        for c in range(4):
-            if board[r, c] == 0:
+            else:
                 empty += 1
     score += empty * 50000.0
     return score
 
 @njit(fastmath=True)
 def evaluate_board_d4_symmetry(board):
-    """Ocena planszy uwzględniająca pełną 8-krotną symetrię grupy D4 (4 obroty + odbicie)."""
     max_eval = -1e18
     b_curr = board.copy()
 
@@ -145,7 +143,6 @@ def get_adaptive_god_move(board, valid_mask=None):
     board_64 = board.astype(np.int64)
     empty_tiles = np.sum(board == 0)
 
-    # DYNAMIC DEPTH SCALING
     if empty_tiles <= 3:
         target_depth = 5
     else:

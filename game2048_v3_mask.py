@@ -58,7 +58,6 @@ class Game2048V3MaskEnv(gym.Env):
         current_max = int(self.board.max()) if self.board.max() > 0 else 0
         self.max_tile = max(self.max_tile, current_max)
 
-        # Zabezpieczenie przed pętlą: koniec gdy brak ruchów LUB 2 nieudane ruchy
         valid_masks = self.action_masks()
         done = self._is_game_over() or (not np.any(valid_masks)) or (self.consecutive_invalid >= 2)
 
@@ -97,50 +96,59 @@ class Game2048V3MaskEnv(gym.Env):
         pos = random.choice(empty_positions)
         self.board[pos] = 2 if random.random() < 0.9 else 4
 
+    def _slide_row_left(self, row):
+        non_zero = row[row != 0]
+        merged = []
+        score = 0
+        skip = False
+        for i in range(len(non_zero)):
+            if skip:
+                skip = False
+                continue
+            if i + 1 < len(non_zero) and non_zero[i] == non_zero[i + 1]:
+                new_val = non_zero[i] * 2
+                merged.append(new_val)
+                score += new_val
+                skip = True
+            else:
+                merged.append(non_zero[i])
+        while len(merged) < 4:
+            merged.append(0)
+        return np.array(merged, dtype=np.int32), score
+
     def _simulate_move(self, board_ref, direction):
-        merge_reward = 0
-        if direction == 0:
-            rotated = board_ref.copy()
-        elif direction == 1:
-            rotated = np.rot90(board_ref, k=-1)
-        elif direction == 2:
-            rotated = np.rot90(board_ref, k=2)
-        elif direction == 3:
-            rotated = np.rot90(board_ref, k=1)
+        """Precyzyjna symulacja 4 kierunków przy użyciu transpozycji macierzy."""
+        new_board = np.zeros((4, 4), dtype=np.int32)
+        total_score = 0
 
-        new_board = np.zeros_like(rotated)
-        for i in range(self.size):
-            row = rotated[i]
-            non_zero = row[row != 0]
-            merged = []
-            skip = False
-            for j in range(len(non_zero)):
-                if skip:
-                    skip = False
-                    continue
-                if j + 1 < len(non_zero) and non_zero[j] == non_zero[j + 1]:
-                    new_val = non_zero[j] * 2
-                    merged.append(new_val)
-                    merge_reward += new_val
-                    skip = True
-                else:
-                    merged.append(non_zero[j])
-            new_board[i, :len(merged)] = merged
+        if direction == 0: # LEWO
+            for r in range(4):
+                new_board[r], s = self._slide_row_left(board_ref[r])
+                total_score += s
+        elif direction == 2: # PRAWO
+            for r in range(4):
+                rev, s = self._slide_row_left(board_ref[r][::-1])
+                new_board[r] = rev[::-1]
+                total_score += s
+        elif direction == 1: # GÓRA (Transpozycja + Lewo)
+            trans = board_ref.T
+            for r in range(4):
+                new_board[r], s = self._slide_row_left(trans[r])
+                total_score += s
+            new_board = new_board.T
+        elif direction == 3: # DÓŁ (Transpozycja + Prawo)
+            trans = board_ref.T
+            for r in range(4):
+                rev, s = self._slide_row_left(trans[r][::-1])
+                new_board[r] = rev[::-1]
+                total_score += s
+            new_board = new_board.T
 
-        if direction == 0:
-            unrotated = new_board
-        elif direction == 1:
-            unrotated = np.rot90(new_board, k=1)
-        elif direction == 2:
-            unrotated = np.rot90(new_board, k=2)
-        elif direction == 3:
-            unrotated = np.rot90(new_board, k=-1)
-
-        changed = not np.array_equal(board_ref, unrotated)
+        changed = not np.array_equal(board_ref, new_board)
         if changed:
-            board_ref[:] = unrotated
+            board_ref[:] = new_board
 
-        return merge_reward, changed
+        return total_score, changed
 
     def _is_game_over(self):
         if np.any(self.board == 0):

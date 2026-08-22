@@ -2,7 +2,7 @@
 import numpy as np
 from numba import njit, uint16, uint32, uint64, int64, float64, boolean, types
 
-# === PREKOMPILACJA TABLIC LOOKUP O(1) NA TYPACH UINT64 ===
+# === 1. PREKOMPILACJA TABLIC LOOKUP O(1) DLA RUCHÓW BITOWYCH ===
 
 def build_row_tables():
     row_left_table = np.zeros(65536, dtype=np.uint64)
@@ -17,7 +17,7 @@ def build_row_tables():
             (row_val >> 12) & 0x0F
         ]
 
-        # --- LEWO ---
+        # LEWO
         non_zero = [c for c in cells if c > 0]
         merged_left = []
         score = 0
@@ -42,7 +42,7 @@ def build_row_tables():
         row_left_table[row_val] = left_val
         row_score_table[row_val] = np.uint64(score)
 
-        # --- PRAWO (POPRAWIONE ODBICIE RUCHU) ---
+        # PRAWO
         non_zero_rev = [c for c in reversed(cells) if c > 0]
         merged_right_temp = []
         skip = False
@@ -69,7 +69,7 @@ def build_row_tables():
 
 ROW_LEFT_TABLE, ROW_RIGHT_TABLE, ROW_SCORE_TABLE = build_row_tables()
 
-# === OPERACJE BITOWE O(1) ===
+# === 2. OPERACJE BITOWE O(1) ===
 
 @njit(uint64(uint64), fastmath=True)
 def transpose_bitboard(board):
@@ -118,49 +118,64 @@ def execute_move_bitboard(board, action):
 
     return new_b, score, changed
 
-# === HEURYSTYKA MATRYCY WĘŻA SOTA ===
+# === 3. SPRAWDZONA MISTRZOWSKA MACIERZ WĘŻA Z V4 ===
 
-SNAKE_WEIGHTS = np.array([
-    [1073741824.0, 268435456.0, 67108864.0, 16777216.0],
-    [65536.0,      262144.0,    1048576.0,  4194304.0],
-    [32768.0,      8192.0,      2048.0,     512.0],
-    [16.0,         32.0,        64.0,       128.0]
+SNAKE_MATRIX = np.array([
+    [1000000.0, 100000.0, 10000.0, 1000.0],
+    [100.0,     200.0,    400.0,   800.0],
+    [80.0,      60.0,     40.0,    20.0],
+    [1.0,       2.0,      3.0,     4.0]
 ], dtype=np.float64)
 
-@njit(float64(uint64), fastmath=True)
-def evaluate_bitboard_sota(board):
+@njit(int64[:, :](uint64), fastmath=True)
+def bitboard_to_numpy(board64):
+    res = np.zeros((4, 4), dtype=np.int64)
+    for r in range(4):
+        for c in range(4):
+            shift = (r * 4 + c) * 4
+            power = int((board64 >> shift) & np.uint64(0x0F))
+            if power > 0:
+                res[r, c] = 1 << power
+    return res
+
+@njit(float64(int64[:, :]), fastmath=True)
+def evaluate_single_aspect_2d(board):
     score = 0.0
-    empty_count = 0
-    max_power = 0
-    max_pos = 0
-
-    for i in range(16):
-        shift = i * 4
-        power = int((board >> shift) & np.uint64(0x0F))
-        if power == 0:
-            empty_count += 1
-        else:
-            val = 1 << power
-            r = i // 4
-            c = i % 4
-            score += val * SNAKE_WEIGHTS[r, c]
-            if power > max_power:
-                max_power = power
-                max_pos = i
-
-    score += empty_count * 500000.0
-
-    if max_pos == 0:
-        score += 10000000.0
-    else:
-        score -= 10000000.0
-
+    empty = 0
+    for r in range(4):
+        for c in range(4):
+            val = board[r, c]
+            if val > 0:
+                score += val * SNAKE_MATRIX[r, c]
+            else:
+                empty += 1
+    score += empty * 50000.0
     return score
+
+@njit(float64(uint64), fastmath=True)
+def evaluate_d4_perfect(board64):
+    board = bitboard_to_numpy(board64)
+    max_eval = -1e18
+    b_curr = board.copy()
+
+    for rot in range(4):
+        e1 = evaluate_single_aspect_2d(b_curr)
+        if e1 > max_eval:
+            max_eval = e1
+        b_flip = np.fliplr(b_curr)
+        e2 = evaluate_single_aspect_2d(b_flip)
+        if e2 > max_eval:
+            max_eval = e2
+        b_curr = np.rot90(b_curr, 1)
+
+    return max_eval
+
+# === 4. EXPECTIMAX Z RÓWNOMIERNYM PRÓBKOWANIEM CAŁEJ PLANSZY ===
 
 @njit(float64(uint64, int64, boolean), fastmath=True)
 def expectimax_v5(board, depth, is_player):
     if depth == 0:
-        return evaluate_bitboard_sota(board)
+        return evaluate_d4_perfect(board)
 
     if is_player:
         best_score = -1e18
@@ -183,11 +198,22 @@ def expectimax_v5(board, depth, is_player):
                 n_empty += 1
 
         if n_empty == 0:
-            return evaluate_bitboard_sota(board)
+            return evaluate_d4_perfect(board)
+
+        # ROZWIĄZANIE: Równomierne próbkowanie (Góra, Środek, Dół)
+        if n_empty > 3 and depth >= 3:
+            p_top = empty_positions[0]
+            p_mid = empty_positions[n_empty // 2]
+            p_bot = empty_positions[n_empty - 1]
+            sample_positions = np.array([p_top, p_mid, p_bot], dtype=np.int64)
+            sample_count = 3
+        else:
+            sample_positions = empty_positions[:n_empty]
+            sample_count = n_empty
 
         expected = 0.0
-        for idx in range(n_empty):
-            pos = empty_positions[idx]
+        for idx in range(sample_count):
+            pos = sample_positions[idx]
             shift = pos * 4
             b2 = board | (np.uint64(1) << shift)
             b4 = board | (np.uint64(2) << shift)
@@ -195,7 +221,7 @@ def expectimax_v5(board, depth, is_player):
             res = 0.9 * expectimax_v5(b2, depth - 1, True) + 0.1 * expectimax_v5(b4, depth - 1, True)
             expected += res
 
-        return expected / float(n_empty)
+        return expected / float(sample_count)
 
 def numpy_to_bitboard(board_np):
     b64 = np.uint64(0)
@@ -212,10 +238,10 @@ def get_v5_ultimate_move(board_np, valid_mask=None):
     b64 = numpy_to_bitboard(board_np)
     empty_tiles = np.sum(board_np == 0)
 
-    if empty_tiles <= 4:
-        target_depth = 6
-    else:
+    if empty_tiles <= 3:
         target_depth = 5
+    else:
+        target_depth = 4
 
     best_action = -1
     best_score = -1e18
